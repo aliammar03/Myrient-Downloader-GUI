@@ -388,14 +388,14 @@ class DownloadThread(QThread):
         self.last_emitted_eta = 0
         
         # Dynamic chunking parameters
-        self.initial_chunk_size = 262144  # Start with 256KB chunks
-        self.min_chunk_size = 65536      # 64KB minimum
-        self.max_chunk_size = 4194304    # 4MB maximum
+        self.initial_chunk_size = 1048576  # Start with 1MB chunks to reduce request overhead
+        self.min_chunk_size = 262144       # 256KB minimum
+        self.max_chunk_size = 8388608      # 8MB maximum
         self.current_chunk_size = self.initial_chunk_size
-        self.chunk_adjust_threshold = 5  # Number of chunks before adjustment
+        self.chunk_adjust_threshold = 3    # Number of chunks before adjustment
         self.chunk_counter = 0
         self.last_adjust_time = 0
-        self.adjust_interval = 2.0       # Seconds between adjustments
+        self.adjust_interval = 1.0         # Seconds between adjustments
         
         # Connection parameters
         self.tcp_nodelay = True          # Disable Nagle's algorithm for better responsiveness
@@ -409,7 +409,7 @@ class DownloadThread(QThread):
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
             'Accept': '*/*',
-            'Accept-Encoding': 'gzip, deflate, br',
+            'Accept-Encoding': 'identity',  # Avoid server-side compression overhead for large archives
             'Connection': 'keep-alive'
         }
 
@@ -421,11 +421,12 @@ class DownloadThread(QThread):
 
                 # Configure client session with optimized parameters
                 connector = aiohttp.TCPConnector(
-                    force_close=False,          # Keep connections alive
-                    ssl=False,                  # Disable SSL verification for speed
-                    ttl_dns_cache=300,          # Cache DNS for 5 minutes
-                    limit=0,                    # No connection limit
-                    enable_cleanup_closed=True  # Clean up closed connections
+                    force_close=False,           # Keep connections alive
+                    ssl=False,                   # Disable SSL verification for speed
+                    ttl_dns_cache=300,           # Cache DNS for 5 minutes
+                    limit=0,                     # No connection limit
+                    enable_cleanup_closed=True,  # Clean up closed connections
+                    use_dns_cache=True
                 )
                 
                 timeout = aiohttp.ClientTimeout(
@@ -435,9 +436,10 @@ class DownloadThread(QThread):
                 )
                 
                 async with aiohttp.ClientSession(
-                    connector=connector, 
+                    connector=connector,
                     timeout=timeout,
-                    headers=headers
+                    headers=headers,
+                    auto_decompress=False  # Preserve raw transfer speed for already-compressed archives
                 ) as session:
                     async with session.get(self.url) as response:
                         if response.status not in (200, 206):
