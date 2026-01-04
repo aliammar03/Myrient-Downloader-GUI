@@ -16,12 +16,20 @@ from PyQt5.QtCore import QThread, pyqtSignal, QEventLoop
 class GetSoftwareListThread(QThread):
     signal = pyqtSignal('PyQt_PyObject')
 
+    ALLOWED_EXTENSIONS = ('.zip', '.chd')
+
     def __init__(self, url, json_file, fetch_sizes=True):
         QThread.__init__(self)
         self.url = url
         # Ensure json file is in config directory
         self.json_file = os.path.join("config", json_file)
         self.fetch_sizes = fetch_sizes
+
+    def _is_supported_file(self, filename):
+        """Return True if the filename has an allowed extension."""
+        if not isinstance(filename, str):
+            return False
+        return filename.lower().endswith(self.ALLOWED_EXTENSIONS)
 
     def run(self):
         file_data = []
@@ -80,7 +88,10 @@ class GetSoftwareListThread(QThread):
                     file_data = self._parse_directory_listing_with_sizes(soup)
                 else:
                     # Just extract filenames without sizes
-                    file_links = [link for link in soup.find_all('a') if link.get('href') and link.get('href').endswith('.zip')]
+                    file_links = [
+                        link for link in soup.find_all('a')
+                        if link.get('href') and self._is_supported_file(link.get('href'))
+                    ]
                     file_data = []
                     for link in file_links:
                         filename = unquote(link.get('href'))
@@ -124,14 +135,14 @@ class GetSoftwareListThread(QThread):
                 # Convert old list using the size map
                 new_data = []
                 for filename in old_list:
-                    if isinstance(filename, str) and filename.endswith('.zip'):
+                    if self._is_supported_file(filename):
                         size = size_map.get(filename, "")
                         new_data.append({
                             'name': filename,
                             'size': size
                         })
                     else:
-                        # Handle error messages or non-zip files
+                        # Handle error messages or non-supported files
                         new_data.append({
                             'name': filename,
                             'size': ""
@@ -147,13 +158,13 @@ class GetSoftwareListThread(QThread):
         # Fallback: just convert format without sizes
         new_data = []
         for filename in old_list:
-            if isinstance(filename, str) and filename.endswith('.zip'):
+            if self._is_supported_file(filename):
                 new_data.append({
                     'name': filename,
                     'size': ""
                 })
             else:
-                # Handle error messages or non-zip files
+                # Handle error messages or non-supported files
                 new_data.append({
                     'name': filename,
                     'size': ""
@@ -221,7 +232,7 @@ class GetSoftwareListThread(QThread):
                 if link_cell and size_cell:
                     # Extract filename from the link
                     link = link_cell.find('a')
-                    if link and link.get('href') and link.get('href').endswith('.zip'):
+                    if link and link.get('href') and self._is_supported_file(link.get('href')):
                         filename = unquote(link.get('href'))
                         
                         # Extract size from size cell
@@ -243,7 +254,7 @@ class GetSoftwareListThread(QThread):
         except Exception as e:
             print(f"Error parsing directory listing: {e}")
             # Fallback to filename-only extraction
-            file_links = soup.find_all('a', href=lambda x: x and x.endswith('.zip'))
+            file_links = soup.find_all('a', href=lambda x: x and self._is_supported_file(x))
             for link in file_links:
                 filename = unquote(link.get('href'))
                 file_data.append({
@@ -264,10 +275,10 @@ class GetSoftwareListThread(QThread):
             for row in rows:
                 cells = row.find_all('td')
                 if len(cells) >= 2:  # Need at least filename and size
-                    # Look for .zip files in any cell
+                    # Look for supported files in any cell
                     for i, cell in enumerate(cells):
                         link = cell.find('a')
-                        if link and link.get('href') and link.get('href').endswith('.zip'):
+                        if link and link.get('href') and self._is_supported_file(link.get('href')):
                             filename = unquote(link.get('href'))
                             
                             # Look for size in subsequent cells
@@ -377,14 +388,14 @@ class DownloadThread(QThread):
         self.last_emitted_eta = 0
         
         # Dynamic chunking parameters
-        self.initial_chunk_size = 262144  # Start with 256KB chunks
-        self.min_chunk_size = 65536      # 64KB minimum
-        self.max_chunk_size = 4194304    # 4MB maximum
+        self.initial_chunk_size = 1048576  # Start with 1MB chunks to reduce request overhead
+        self.min_chunk_size = 262144       # 256KB minimum
+        self.max_chunk_size = 8388608      # 8MB maximum
         self.current_chunk_size = self.initial_chunk_size
-        self.chunk_adjust_threshold = 5  # Number of chunks before adjustment
+        self.chunk_adjust_threshold = 3    # Number of chunks before adjustment
         self.chunk_counter = 0
         self.last_adjust_time = 0
-        self.adjust_interval = 2.0       # Seconds between adjustments
+        self.adjust_interval = 1.0         # Seconds between adjustments
         
         # Connection parameters
         self.tcp_nodelay = True          # Disable Nagle's algorithm for better responsiveness
@@ -398,7 +409,7 @@ class DownloadThread(QThread):
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
             'Accept': '*/*',
-            'Accept-Encoding': 'gzip, deflate, br',
+            'Accept-Encoding': 'identity',  # Avoid server-side compression overhead for large archives
             'Connection': 'keep-alive'
         }
 
@@ -410,11 +421,12 @@ class DownloadThread(QThread):
 
                 # Configure client session with optimized parameters
                 connector = aiohttp.TCPConnector(
-                    force_close=False,          # Keep connections alive
-                    ssl=False,                  # Disable SSL verification for speed
-                    ttl_dns_cache=300,          # Cache DNS for 5 minutes
-                    limit=0,                    # No connection limit
-                    enable_cleanup_closed=True  # Clean up closed connections
+                    force_close=False,           # Keep connections alive
+                    ssl=False,                   # Disable SSL verification for speed
+                    ttl_dns_cache=300,           # Cache DNS for 5 minutes
+                    limit=0,                     # No connection limit
+                    enable_cleanup_closed=True,  # Clean up closed connections
+                    use_dns_cache=True
                 )
                 
                 timeout = aiohttp.ClientTimeout(
@@ -424,9 +436,10 @@ class DownloadThread(QThread):
                 )
                 
                 async with aiohttp.ClientSession(
-                    connector=connector, 
+                    connector=connector,
                     timeout=timeout,
-                    headers=headers
+                    headers=headers,
+                    auto_decompress=False  # Preserve raw transfer speed for already-compressed archives
                 ) as session:
                     async with session.get(self.url) as response:
                         if response.status not in (200, 206):
